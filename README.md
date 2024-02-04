@@ -37,4 +37,5 @@
 Задание будет выполняться каждые 20 секунд, чтобы удалить задание /task skip
 
 Есть сторонние команды для подгрузки файлов.
-Например /task download_by_url https://i.pinimg.com/originals/23/66/0d/23660defa9c0eb637fdd109fbaaf9487.gif
+Например /task download_by_url ссылка на файл
+Файл будет скачиваться в C:\\Users
