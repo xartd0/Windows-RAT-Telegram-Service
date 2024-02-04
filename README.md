@@ -1,8 +1,40 @@
-I wanted to try to write a rat that would have basic functionality, which is executing any commands in cmd/powershell and swapping the file from outside. The built-in windows libraries were also used exclusively.
-The control is very simple, every 20 seconds the bot checks for updates in the bot.
-You can set a task for him via the /task command (argument).
-For example /task tasklist, it will perform this task every 20 seconds until you set the task /task skip, there is also a separate command /task download_by_url link, after it is executed,
-it will download any file to the folder "C:\\Users ". Since RAT is installed as a windows service,
-it will be launched every time the PC starts. The installation is very simple, run builder.py , specify your userid in telegram and the bot token, after that it will compile two files under the names start.exe and main.exe.
-To install the service on a PC, run start.exe on behalf of the administrator, you can delete files after that.
-Make sure that you have installed g++ and pyinstaller, this is necessary to compile the service.
+# Удаленное управление через сервис windows и telegram
+
+<!-- Run Locally -->
+### :running: Запуск локально
+
+Клонируем репозиторий
+
+```bash
+  git clone https://github.com/xartd0/Windows-RAT-Telegram-Service
+```
+
+Заходим в его папку
+
+```bash
+  cd Windows-RAT-Telegram-Service
+```
+
+Билдим лоадер и сам сервис
+
+```bash
+  python builder.py
+```
+
+Запускаем start.exe (от им.админа) в папке output
+
+```bash
+  start.exe
+```
+
+Чтобы лоадер создал сервис, оба файла должнры быть в одной папке.
+
+### :eyes: Использование
+
+В боте вы сможете устанавливать задание для всех ботов сразу через /task. 
+Например: /task echo %USERNAME%
+
+Задание будет выполняться каждые 20 секунд, чтобы удалить задание /task skip
+
+Есть сторонние команды для подгрузки файлов.
+Например /task download_by_url https://i.pinimg.com/originals/23/66/0d/23660defa9c0eb637fdd109fbaaf9487.gif
